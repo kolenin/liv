@@ -125,6 +125,7 @@ body.dark-btn .btn{color:#000}
 .psbar{grid-column:2 / 4;height:4px;border-radius:2px;background:var(--line);overflow:hidden}
 .psbar i{display:block;height:100%;border-radius:2px;background:var(--accent)}
 .ps.top .rk{color:var(--accent)}
+.cd{font-size:34px;font-weight:800;letter-spacing:-.5px;font-variant-numeric:tabular-nums;color:var(--accent);line-height:1.1}
 /* Chips */
 .chips{display:flex;gap:8px;overflow-x:auto;margin:0 -16px 6px;padding:2px 16px 8px;scrollbar-width:none}
 .chips::-webkit-scrollbar{display:none}
@@ -200,10 +201,10 @@ p.foot{color:var(--muted);font-size:12.5px;margin:12px 16px 0}
     <h1>Матч</h1>
     <div class="hero" id="hero"></div>
     <p class="foot" id="src" style="text-align:center"></p>
-    <h2>Прошлые матчи</h2>
-    <div class="list" id="pastHome"></div>
     <h2>Следующие матчи</h2>
     <div class="list" id="next"></div>
+    <h2>Прошлые матчи</h2>
+    <div class="list" id="pastHome"></div>
   </section>
 
   <section class="screen" id="detail">
@@ -473,6 +474,8 @@ const upcomingOK=f=>f.state==='in'||(f.state==='pre'&&Date.now()<f.date.getTime(
 
 /* ---------- Рендер ---------- */
 let lastKey='', HERO_ID=null;
+const cdText=ts=>{let t=Math.max(0,Math.floor((ts-Date.now())/1000)); const h=Math.floor(t/3600); t%=3600;
+  return String(h).padStart(2,'0')+':'+String(Math.floor(t/60)).padStart(2,'0')+':'+String(t%60).padStart(2,'0')};
 function statusBlock(f){
   const now=Date.now(), live=f.state==='in', done=f.state==='post';
   if(live) return {top:`<span class="pill ${f.ht?'':'live'}">${f.ht?'Перерыв':'LIVE'}</span><span>${f.comp}</span>`,
@@ -482,6 +485,8 @@ function statusBlock(f){
   if(f.date<=now){const going=now<f.date.getTime()+130*60000;
     return {top:`<span class="pill ${going?'live':''}">${going?'Идёт':'Завершён'}</span><span>${f.comp}</span>`,
       mid:`<div class="score">—:—</div><div class="sub">${going?(SOURCE==='live'?'Ждём данные о счёте':'Нет live-данных'):'Результат уточняется'}</div>`}}
+  if(f.date-now<=24*3600e3) return {top:`<span class="pill">Скоро</span><span>${f.comp}</span>`,
+    mid:`<div class="cd" data-ts="${f.date.getTime()}">${cdText(f.date.getTime())}</div><div class="sub">до начала матча</div>`};
   return {top:`<span class="pill">Скоро</span><span>${f.comp}</span>`, mid:`<div class="kick">${fmtTime(f.date)}</div>`};
 }
 function heroMarkup(f){
@@ -493,10 +498,12 @@ function heroMarkup(f){
 function renderHero(){
   const hero=$('#hero'), now=Date.now();
   // самое недавнее событие: идущий матч, иначе последний начавшийся (даже если итог ещё не получен)
-  const f=FIXTURES.find(x=>x.state==='in')||[...FIXTURES].filter(x=>x.date<=now).sort((a,b)=>b.date-a.date)[0];
+  const live=FIXTURES.find(x=>x.state==='in');
+  const soon=live?null:FIXTURES.filter(x=>x.state==='pre'&&x.date>now&&x.date-now<=24*3600e3).sort((a,b)=>a.date-b.date)[0];   // за 24 часа до начала — превью предстоящего матча
+  const f=live||soon||[...FIXTURES].filter(x=>x.date<=now).sort((a,b)=>b.date-a.date)[0];
   if(!f){HERO_ID=null;hero.removeAttribute('data-id');hero.innerHTML='<div class="empty">Нет данных о матчах</div>';return}
   HERO_ID=f.id; hero.dataset.id=f.id;
-  const key=[f.id,f.state,f.hs,f.as,f.clock,f.ht,SOURCE,Math.floor(now/600000)].join('|');
+  const key=[f.id,f.state,f.hs,f.as,f.clock,f.ht,SOURCE,soon?1:0,Math.floor(now/600000)].join('|');
   if(key!==lastKey){
     const prevScore=lastKey.split('|').slice(2,4).join('|');
     lastKey=key; hero.innerHTML=heroMarkup(f);
@@ -598,11 +605,14 @@ async function loadDetail(){
 }
 function parseEvents(j){
   const hd=j.header&&j.header.competitions&&j.header.competitions[0];
-  const det=(hd&&hd.details)||j.details||[], out=[], seen=new Set();
+  const det=(hd&&hd.details)||j.details||[], out=[], seen=new Map();
   const nm=a=>a&&(a.displayName||a.fullName||(a.athlete&&a.athlete.displayName))||'';
   const people=d=>((d.athletesInvolved&&d.athletesInvolved.length?d.athletesInvolved:(d.participants||[]).map(p=>p.athlete||p))||[]).map(nm).filter(Boolean);
   const num=m=>{const x=String(m||'').match(/(\d+)(?:\D+(\d+))?/);return x?(+x[1])+(x[2]?(+x[2])/100:0):999};
-  const add=e=>{const k=[e.min,e.sub?'s':e.goal?'g':e.red?'r':'y',e.player||e.pin].join('|'); if(seen.has(k)) return; seen.add(k); out.push(e)};
+  const add=e=>{const k=[e.min,e.sub?'s':e.goal?'g':e.red?'r':'y',e.player||e.pin].join('|'); const ex=seen.get(k);
+    if(ex){ if(e.assist&&!ex.assist) ex.assist=e.assist; if(e.pen) ex.pen=true; return } seen.set(k,e); out.push(e)};
+  const assistOf=d=>{ if(d.ownGoal||/own/i.test((d.type&&d.type.text)||'')) return ''; const p=people(d); if(p[1]) return p[1];
+    const m=String(d.text||d.shortText||'').match(/assisted by\s+([^.,]+?)(?:\s+with|\s+following|\s+from|\.|,|$)/i); return m?m[1].trim():'' };
   const subFrom=(d,tt)=>{ // замена: «X replaces Y» в тексте, иначе по порядку участников
     const m=String(d.text||d.shortText||'').match(/\.\s*([^.]+?)\s+replaces\s+([^.]+?)(?:\.|\s+because|$)/i); let pin,pout;
     if(m){pin=m[1].trim();pout=m[2].trim()} else {const p=people(d); pin=p[0]||'';pout=p[1]||''}
@@ -611,7 +621,7 @@ function parseEvents(j){
     mine:!!(d.team&&String(d.team.id)===TEAM_ID)});
   det.forEach(d=>{
     const tt=(d.type&&(d.type.text||d.type.type))||'', e=base(d,tt);
-    if(d.scoringPlay){add({...e,goal:true,og:!!d.ownGoal,pen:!!d.penaltyKick,player:people(d)[0]||''})}
+    if(d.scoringPlay){add({...e,goal:true,og:!!d.ownGoal,pen:!!d.penaltyKick,player:people(d)[0]||'',assist:assistOf(d)})}
     else if(d.redCard){add({...e,red:true,player:people(d)[0]||''})}
     else if(d.yellowCard){add({...e,yellow:true,player:people(d)[0]||''})}
     else if(/substitution/i.test(tt)){add({...e,...subFrom(d,tt)})}
@@ -621,7 +631,7 @@ function parseEvents(j){
     if(/shootout/i.test(tt)||k.shootout) return;
     if(/substitution/i.test(tt)){add({...e,...subFrom(k,tt)});return}
     const goal=!!k.scoringPlay||(/goal/i.test(tt)&&!/disallow|no goal/i.test(tt)), red=/red/i.test(tt), yellow=/yellow/i.test(tt)&&!red;
-    if(goal) add({...e,goal:true,og:/own/i.test(tt),pen:/penalty/i.test(tt),player:people(k)[0]||''});
+    if(goal) add({...e,goal:true,og:/own/i.test(tt),pen:/penalty/i.test(tt),player:people(k)[0]||'',assist:assistOf(k)});
     else if(red) add({...e,red:true,player:people(k)[0]||''});
     else if(yellow) add({...e,yellow:true,player:people(k)[0]||''});
   });
@@ -674,7 +684,7 @@ function renderDetail(){
     const [L,R]=names(f), [lg,rg]=logos(f), meLeft=f.home;
     const ico=e=>e.sub?'🔄':e.goal?'⚽️':e.red?'🟥':'🟨';
     const cell=(e,left)=>{const body=e.sub?`<b>${esc(e.pin||'—')}</b> <span style="color:#34c759">▲</span><br><span style="color:var(--muted);font-size:13px">${esc(e.pout||'—')} ▼</span>`
-      :`<b>${esc(e.player||'—')}</b>${e.goal?(e.og?' (автогол)':e.pen?' (пен.)':''):''}`; return left?`${body} ${ico(e)}`:`${ico(e)} ${body}`};
+      :`<b>${esc(e.player||'—')}</b>${e.goal?(e.og?' (автогол)':e.pen?' (пенальти)':e.assist?' ('+esc(e.assist)+')':''):''}`; return left?`${body} ${ico(e)}`:`${ico(e)} ${body}`};
     body.innerHTML=`<div class="list"><div class="evh"><div>${esc(L)} ${miniCrest(L,lg)}</div><div></div><div>${miniCrest(R,rg)} ${esc(R)}</div></div>`+
       (f.state==='in'?[...ev].reverse():ev).map(e=>{const left=(e.mine===meLeft);
         return `<div class="ev2"><div class="l">${left?cell(e,true):''}</div><div class="m">${esc(e.min)}</div><div>${left?'':cell(e,false)}</div></div>`}).join('')+'</div>';
@@ -772,6 +782,52 @@ const PKEYS={'Александер Исак':'isak','Виктор Муньос':
   'Алиссон':'alisson','Трей Нёни':'nyoni','Жереми Фримпонг':'frimpong','Льюис Кумас':'koumas','Рио Нгумоха':'ngumoha'};
 PLAYERS.forEach(p=>p.k=PKEYS[p.n]);
 const norm=t=>String(t||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+const SQUAD=[
+  {n:'Алиссон',k:'alisson',pos:'Вратарь',m:0,v:null},
+  {n:'Джорджи Мамардашвили',k:'mamardashvili',pos:'Вратарь',m:0,v:null},
+  {n:'Фредди Вудман',k:'woodman',pos:'Вратарь',m:0,v:null},
+  {n:'Витезслав Ярош',k:'jaros',pos:'Вратарь',m:0,v:null},
+  {n:'Джо Гомес',k:'gomez',pos:'Защитник',m:0,v:null},
+  {n:'Вирджил ван Дейк',k:'van dijk',pos:'Защитник',m:0,v:null},
+  {n:'Жереми Жаке',k:'jacquet',pos:'Защитник',m:0,v:null},
+  {n:'Милош Керкез',k:'kerkez',pos:'Защитник',m:0,v:null},
+  {n:'Конор Брэдли',k:'conor bradley',pos:'Защитник',m:0,v:null},
+  {n:'Джованни Леони',k:'leoni',pos:'Защитник',m:0,v:null},
+  {n:'Костас Цимикас',k:'tsimikas',pos:'Защитник',m:0,v:null},
+  {n:'Жереми Фримпонг',k:'frimpong',pos:'Защитник',m:0,v:null},
+  {n:'Рональд Араухо',k:'araujo',pos:'Защитник',m:0,v:null},
+  {n:'Люк Чемберс',k:'chambers',pos:'Защитник',m:0,v:null},
+  {n:'Ватару Эндо',k:'endo',pos:'Полузащитник',m:0,v:null},
+  {n:'Флориан Вирц',k:'wirtz',pos:'Полузащитник',m:0,v:null},
+  {n:'Доминик Собослаи',k:'szoboszlai',pos:'Полузащитник',m:0,v:null},
+  {n:'Алексис Мак Аллистер',k:'mac allister',pos:'Полузащитник',m:0,v:null},
+  {n:'Райан Гравенберх',k:'gravenberch',pos:'Полузащитник',m:0,v:null},
+  {n:'Трей Нёни',k:'nyoni',pos:'Полузащитник',m:0,v:null},
+  {n:'Джеймс МакКоннелл',k:'mcconnell',pos:'Полузащитник',m:0,v:null},
+  {n:'Александер Исак',k:'isak',pos:'Нападающий',m:0,v:null},
+  {n:'Федерико Кьеза',k:'chiesa',pos:'Нападающий',m:0,v:null},
+  {n:'Коди Гакпо',k:'gakpo',pos:'Нападающий',m:0,v:null},
+  {n:'Уго Экитике',k:'ekitike',pos:'Нападающий',m:0,v:null},
+  {n:'Виктор Муньос',k:'munoz',pos:'Нападающий',m:0,v:null},
+  {n:'Брэдли Баркола',k:'barcola',pos:'Нападающий',m:0,v:null},
+  {n:'Льюис Кумас',k:'koumas',pos:'Нападающий',m:0,v:null},
+  {n:'Рио Нгумоха',k:'ngumoha',pos:'Нападающий',m:0,v:null},
+  {n:'Джейден Дэннс',k:'danns',pos:'Нападающий',m:0,v:null}
+];
+const VALUES_URL='values.json';   // файл рядом с index.html; обновляется раз в 6 часов
+const DEFAULT_VALUES={"isak": 106, "szoboszlai": 105, "barcola": 100, "jacquet": 86.4, "wirtz": 79.3, "gakpo": 74.9, "gravenberch": 74.4, "ngumoha": 73.2, "ekitike": 70.9, "mac allister": 66.1};
+let VAL_ASOF='ноябрь 2026 (FootballTransfers)', VAL_AT=0;
+function applyValues(vals){ SQUAD.forEach(p=>{const v=vals&&vals[p.k]; if(v!=null&&!isNaN(+v)) p.v=+v}) }
+applyValues(DEFAULT_VALUES); try{applyValues(JSON.parse(store.get('vals')||'null'))}catch(e){}
+async function loadValues(){
+  try{
+    const r=await fetch(VALUES_URL+'?t='+Date.now(),{cache:'no-store'}); if(!r.ok) return;
+    const j=await r.json(), vals=j.values||j; applyValues(vals); store.set('vals',JSON.stringify(vals));
+    if(j.asOf) VAL_ASOF=j.asOf; VAL_AT=Date.now(); renderPStats();
+  }catch(e){}
+}
+setInterval(loadValues,6*3600*1000);
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&Date.now()-VAL_AT>6*3600*1000) loadValues() });
 const POS_RU=a=>{a=String(a||'').toUpperCase(); return /^G/.test(a)?'Вратарь':/D|B$/.test(a)&&!/^DM/.test(a)?'Защитник':/^(F|ST|CF|LW|RW|SS|W)/.test(a)?'Нападающий':a?'Полузащитник':''};
 const ruPl=n=>{n=Math.abs(n)%100;const d=n%10;return n>10&&n<20?'матчей':d===1?'матч':d>=2&&d<=4?'матча':'матчей'};
 const PS_COMPS={'eng.1':'Премьер лига','uefa.champions':'Лига чемпионов'};
@@ -830,7 +886,7 @@ function aggRows(comp){
   fx.forEach(f=>{
     const e0=f.state==='post'?PSC[f.id]:PSLIVE[f.id], rows=e0&&(Array.isArray(e0)?(f.state==='in'?e0:null):(e0.rows||null)); if(!rows) return; loaded++;
     const ga=f.home?f.as:f.hs;                                   // сколько пропустил Ливерпуль в матче
-    rows.forEach(r=>{const nk=norm(r.name), st=PLAYERS.find(p=>p.k&&nk.includes(p.k)); const key=st?st.k:nk;
+    rows.forEach(r=>{const nk=norm(r.name), st=SQUAD.find(p=>nk.includes(p.k)); const key=st?st.k:nk;
       const e=map.get(key)||{n:st?st.n:r.name,pos:st?st.pos:POS_RU(r.pos),m:0,g:0,a:0,y:0,r:0,cs:0,rs:0,rn:0,v:st?st.v:null};
       e.m+=r.m;e.g+=r.g;e.a+=r.a;e.y+=r.y||0;e.r+=r.r||0;
       if(ga===0&&r.m&&/Вратарь|Защитник/.test(e.pos)) e.cs++;     // сухой матч — для вратарей и защитников
@@ -849,7 +905,7 @@ function renderPStats(){
   sub.querySelectorAll('.chip').forEach(b=>b.classList.toggle('on',b.dataset.ps===PS_TAB));
   sub.style.display=PS_COMP==='value'?'none':'';
   const body=$('#psBody'), foot=$('#psFoot'); let list,key,note;
-  if(PS_COMP==='value'){ key='v'; list=PLAYERS; note='Оценка FootballTransfers (ETV) на ноябрь 2026, внесена вручную и не обновляется сама. Для игроков без данных стоит «н/д», они в конце списка.'; }
+  if(PS_COMP==='value'){ key='v'; list=SQUAD; note=`Оценка стоимости игроков (FootballTransfers, ETV): ${VAL_ASOF}. Данные берутся из файла values.json рядом с приложением и обновляются раз в 6 часов; у игроков без значения стоит «н/д», они в конце списка. Transfermarkt автоматически подтянуть нельзя: у него нет открытого API, он блокирует запросы из браузера.`; }
   else{
     const tab=PS_TABS.find(t=>t[0]===PS_TAB)||PS_TABS[0]; key=tab[2];
     const compName=PS_COMPS[PS_COMP], agg=aggRows(compName), complete=agg.total&&agg.loaded===agg.total&&agg.rows.length;
@@ -863,6 +919,8 @@ function renderPStats(){
     if(key==='y'||key==='r') note+=' Чем больше карточек, тем выше в списке.';
     if(key==='cs') note+=' Сухой матч засчитывается вратарям и защитникам, сыгравшим в матче, в котором Ливерпуль не пропустил.';
   }
+  if(key!=='v') list=list.filter(p=>key==='rt'?p.rt!=null:(p[key]||0)>0);   // игроков с нулём не показываем
+  if(!list.length){ body.innerHTML='<div class="note">Пока нет игроков с этим показателем.</div>'; foot.textContent=note; return }
   list=[...list].sort((x,y)=>{
     const xv=x[key]==null?-1:x[key], yv=y[key]==null?-1:y[key];
     if(yv!==xv) return yv-xv;
@@ -892,6 +950,10 @@ function switchTab(id){
 }
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>switchTab(t.dataset.t));
 
+setInterval(()=>{
+  renderHero();   // сам переключится на предстоящий матч за 24 часа и обратно после начала
+  document.querySelectorAll('.cd[data-ts]').forEach(el=>{el.textContent=cdText(+el.dataset.ts)});
+},1000);
 renderAll();   // сразу показываем сохранённые данные
 renderStandings(); loadStandings(); renderPStats();
 setTimeout(()=>{ if(CUR_LG!=='uefa.champions') loadStandings('uefa.champions') },1500);   // заранее подгружаем таблицу и логотипы Лиги чемпионов

@@ -1,4 +1,4 @@
-const CACHE = 'lfc-tracker-v27';
+const CACHE = 'lfc-tracker-v30';
 const LOGOS = 'lfc-logos';   // логотипы клубов с ESPN: кэшируются при первом показе и дальше работают оффлайн
 const ASSETS = [
   './', './index.html', './manifest.json',
