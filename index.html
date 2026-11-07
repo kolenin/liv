@@ -284,6 +284,11 @@ const CREST_DATA = {"Ливерпуль": "data:image/png;base64,iVBORw0KGgoAAAA
 
 /* ---------- Загрузка live-данных ESPN ---------- */
 const ymd = d => d.toISOString().slice(0,10).replace(/-/g,'');
+const PRELOADED=new Set();
+function prefetchLogos(urls){
+  const q=[...new Set(urls.filter(u=>u&&/^https?:/.test(u)&&!PRELOADED.has(u)))]; q.forEach(u=>PRELOADED.add(u));
+  let i=0; (function next(){ for(let k=0;k<6&&i<q.length;k++,i++){const im=new Image(); im.src=q[i]} if(i<q.length) setTimeout(next,250) })();
+}
 const scoreOf=x=>{const v=x&&x.score; if(v&&typeof v==='object') return parseInt(v.value!=null?v.value:v.displayValue,10)||0; return parseInt(v,10)||0};
 const shootOf=x=>{const v=x&&x.shootoutScore; if(v==null) return null; return typeof v==='object'?+(v.value!=null?v.value:v.displayValue):+v};
 function toFixture(ev,lg){
@@ -307,12 +312,19 @@ function toFixture(ev,lg){
 }
 // весь календарь сезона по каждому турниру (АПЛ, Лига чемпионов, Кубок Англии, Кубок лиги) — расписание команды в ESPN
 async function loadSeason(){
-  const out=[]; let ok=0;
-  await Promise.all(Object.keys(LEAGUES).map(async lg=>{
-    try{const r=await fetch(`${ESPN}${lg}/teams/${TEAM_ID}/schedule`,{cache:'no-store'}); if(!r.ok) return;
-      const j=await r.json(); ok++; (j.events||[]).forEach(ev=>{const f=toFixture(ev,lg); if(f) out.push(f)})}catch(e){}
-  }));
-  return {out,ok};
+  const keys=Object.keys(LEAGUES), map=new Map(); let ok=0;
+  const getJ=url=>fetch(url,{cache:'no-store'}).then(r=>r.ok?r.json():null).catch(()=>null);
+  const take=(j,lg)=>{ if(!j) return; ok++; (j.events||[]).forEach(ev=>{const f=toFixture(ev,lg); if(f&&!map.has(f.id)) map.set(f.id,f)}) };
+  // 1) расписание команды в каждом турнире
+  const jobs=keys.map(lg=>getJ(`${ESPN}${lg}/teams/${TEAM_ID}/schedule`).then(j=>take(j,lg)));
+  // 2) проход табло по датам от сегодня до конца сезона (1 июня) кусками по 20 дней — ловит матчи, которых нет в расписании
+  const now=new Date(), endY=now.getUTCMonth()>=6?now.getUTCFullYear()+1:now.getUTCFullYear(), end=new Date(Date.UTC(endY,5,1));
+  for(let t=Date.now(); t<end; t+=20*864e5){
+    const a=new Date(t), b=new Date(Math.min(t+19*864e5,+end));
+    keys.forEach(lg=>jobs.push(getJ(`${ESPN}${lg}/scoreboard?dates=${ymd(a)}-${ymd(b)}`).then(j=>take(j,lg))));
+  }
+  await Promise.all(jobs);
+  return {out:[...map.values()],ok};
 }
 async function loadMatches(full){
   const keys=Object.keys(LEAGUES); ERRS=[];
@@ -350,7 +362,7 @@ async function refresh(){
     if(full) loadStandings();
     if(full) lastFull=ERRS.length?Date.now()-25*60000:Date.now();   // при ошибках повторим через 5 минут
     const byId=new Map(FIXTURES.filter(f=>f.lg).map(f=>[f.id,f]));
-    if(Date.now()-lastSeason>3*3600*1000){                     // календарь сезона: раз в 3 часа (обновляет кубки и ЛЧ по ходу жеребьёвок)
+    if(Date.now()-lastSeason>3*3600*1000||!lastSeason){                     // календарь сезона: раз в 3 часа (обновляет кубки и ЛЧ по ходу жеребьёвок)
       const se=await loadSeason(); lastSeason=se.ok?Date.now():Date.now()-170*60000;
       se.out.forEach(f=>{const ex=byId.get(f.id); if(!ex||ex.state==='pre') byId.set(f.id,f)});
     }
@@ -364,6 +376,7 @@ async function refresh(){
     });
   }catch(e){ if(SOURCE==='live') SOURCE='cache'; LASTERR=(e&&e.message)||'ошибка'; }
   firstLoad=false;
+  prefetchLogos(FIXTURES.filter(f=>!CREST_DATA[f.opp]).map(f=>f.oppLogo));
   renderAll();
   if(DET.open){renderDetail();loadDetail()}
 }
@@ -466,7 +479,7 @@ function renderCalendar(){
   const past=FIXTURES.filter(f=>isPlayed(f)&&ok(f)).sort((a,b)=>b.date-a.date);
   $('#calBody').innerHTML=groupByMonth(up,upRight)||'<div class="list"><div class="empty">Нет матчей по выбранному фильтру</div></div>';
   $('#resBody').innerHTML=groupByMonth(past,pastRight)||'<div class="list"><div class="empty">Нет результатов по выбранному фильтру</div></div>';
-  $('#foot').textContent={live:'Календарь: ESPN. Матчи Кубка Англии и Лиги чемпионов появляются по мере жеребьёвок и обновляются автоматически.',
+  $('#foot').textContent={live:'Календарь до конца сезона из ESPN. Матчи Кубка Англии и Лиги чемпионов появляются по мере жеребьёвок и обновляются автоматически.',
     cache:'Нет связи с ESPN — показаны последние сохранённые данные.',static:'Нет связи с ESPN — показаны встроенные данные на 1 ноября 2026.'}[SOURCE];
 }
 document.addEventListener('click',e=>{const c=e.target.closest('[data-chip]'); if(c){CAL_F=c.dataset.chip;store.set('calf',CAL_F);renderCalendar();e.stopPropagation()}},true);
@@ -504,56 +517,77 @@ function openMatch(id){
 function closeMatch(){DET.open=false;$('#app').classList.remove('detail');switchTab(DET.prev)}
 async function loadDetail(){
   const id=DET.id, f=FIXTURES.find(x=>x.id===id); if(!f) return;
-  if(!f.lg){DET.err[id]='нет данных ESPN для этого матча';renderDetail();return}
-  try{
-    const r=await fetch(`${ESPN}${f.lg}/summary?event=${encodeURIComponent(id)}`,{cache:'no-store'});
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    DET.data[id]=await r.json(); DET.err[id]='';
-  }catch(e){ DET.err[id]=(e&&e.message)||'сеть/CORS' }
+  if(!/^\d+$/.test(id)){DET.err[id]='нет данных ESPN для этого матча';renderDetail();return}
+  const slugs=[f.lg,...Object.keys(LEAGUES),'all'].filter((v,i,a)=>v&&a.indexOf(v)===i), tried=[];
+  const hosts=['https://site.api.espn.com/apis/site/v2/sports/soccer/','https://site.web.api.espn.com/apis/site/v2/sports/soccer/'];
+  outer: for(const [hi,host] of hosts.entries()) for(const lg of (hi?[f.lg,'all'].filter(Boolean):slugs)){
+    try{
+      const r=await fetch(`${host}${lg}/summary?event=${encodeURIComponent(id)}`,{cache:'no-store'});
+      if(!r.ok){tried.push(`${lg}: ${r.status}`);continue}
+      const j=await r.json();
+      if(j&&(j.boxscore||j.rosters||j.keyEvents||j.header||j.details)){DET.data[id]=j;DET.err[id]='';break outer}
+      tried.push(`${lg}: пустой ответ`);
+    }catch(e){tried.push(`${lg}: сеть/CORS`)}
+  }
+  if(!DET.data[id]) DET.err[id]=tried.slice(0,3).join('; ')||'нет ответа';
   if(DET.open&&DET.id===id) renderDetail();
 }
 function parseEvents(j){
   const hd=j.header&&j.header.competitions&&j.header.competitions[0];
-  const det=(hd&&hd.details)||j.details||[], out=[];
-  const who=d=>{const a=(d.athletesInvolved&&d.athletesInvolved[0])||(d.participants&&d.participants[0]&&d.participants[0].athlete);
-    return (a&&(a.displayName||a.fullName||(a.athlete&&a.athlete.displayName)))||''};
-  det.forEach(d=>{ if(d.scoringPlay||d.yellowCard||d.redCard) out.push({min:(d.clock&&d.clock.displayValue)||'',goal:!!d.scoringPlay,yellow:!!d.yellowCard,
-    red:!!d.redCard,og:!!d.ownGoal,pen:!!d.penaltyKick,mine:!!(d.team&&String(d.team.id)===TEAM_ID),player:who(d)}) });
-  if(!out.length) (j.keyEvents||[]).forEach(k=>{
-    const tt=(k.type&&(k.type.text||k.type.type))||'';
-    if(/shootout/i.test(tt)||k.shootout) return;
-    const goal=!!k.scoringPlay||(/goal/i.test(tt)&&!/disallow|no goal/i.test(tt)), yellow=/yellow/i.test(tt), red=/red/i.test(tt);
-    if(!goal&&!yellow&&!red) return;
-    out.push({min:(k.clock&&k.clock.displayValue)||'',goal,yellow:yellow&&!red,red,og:/own/i.test(tt),pen:/penalty/i.test(tt),
-      mine:!!(k.team&&String(k.team.id)===TEAM_ID),player:who(k)});
+  const det=(hd&&hd.details)||j.details||[], out=[], seen=new Set();
+  const nm=a=>a&&(a.displayName||a.fullName||(a.athlete&&a.athlete.displayName))||'';
+  const people=d=>((d.athletesInvolved&&d.athletesInvolved.length?d.athletesInvolved:(d.participants||[]).map(p=>p.athlete||p))||[]).map(nm).filter(Boolean);
+  const num=m=>{const x=String(m||'').match(/(\d+)(?:\D+(\d+))?/);return x?(+x[1])+(x[2]?(+x[2])/100:0):999};
+  const add=e=>{const k=[e.min,e.sub?'s':e.goal?'g':e.red?'r':'y',e.player||e.pin].join('|'); if(seen.has(k)) return; seen.add(k); out.push(e)};
+  const subFrom=(d,tt)=>{ // замена: «X replaces Y» в тексте, иначе по порядку участников
+    const m=String(d.text||d.shortText||'').match(/\.\s*([^.]+?)\s+replaces\s+([^.]+?)(?:\.|\s+because|$)/i); let pin,pout;
+    if(m){pin=m[1].trim();pout=m[2].trim()} else {const p=people(d); pin=p[0]||'';pout=p[1]||''}
+    return {sub:true,pin,pout,player:pin}};
+  const base=(d,tt)=>({min:(d.clock&&d.clock.displayValue)||'',goal:false,yellow:false,red:false,og:false,pen:false,
+    mine:!!(d.team&&String(d.team.id)===TEAM_ID)});
+  det.forEach(d=>{
+    const tt=(d.type&&(d.type.text||d.type.type))||'', e=base(d,tt);
+    if(d.scoringPlay){add({...e,goal:true,og:!!d.ownGoal,pen:!!d.penaltyKick,player:people(d)[0]||''})}
+    else if(d.redCard){add({...e,red:true,player:people(d)[0]||''})}
+    else if(d.yellowCard){add({...e,yellow:true,player:people(d)[0]||''})}
+    else if(/substitution/i.test(tt)){add({...e,...subFrom(d,tt)})}
   });
-  return out;
+  (j.keyEvents||[]).forEach(k=>{
+    const tt=(k.type&&(k.type.text||k.type.type))||'', e=base(k,tt);
+    if(/shootout/i.test(tt)||k.shootout) return;
+    if(/substitution/i.test(tt)){add({...e,...subFrom(k,tt)});return}
+    const goal=!!k.scoringPlay||(/goal/i.test(tt)&&!/disallow|no goal/i.test(tt)), red=/red/i.test(tt), yellow=/yellow/i.test(tt)&&!red;
+    if(goal) add({...e,goal:true,og:/own/i.test(tt),pen:/penalty/i.test(tt),player:people(k)[0]||''});
+    else if(red) add({...e,red:true,player:people(k)[0]||''});
+    else if(yellow) add({...e,yellow:true,player:people(k)[0]||''});
+  });
+  return out.sort((a,b)=>num(a.min)-num(b.min));
 }
 function parseSummary(j,f){
-  const pick=arr=>{const me=arr.find(x=>x&&x.team&&String(x.team.id)===TEAM_ID), op=arr.find(x=>x&&x!==me);
-    return f.home?[me,op]:[op,me]};
+  const pick=arr=>{const a=arr.filter(Boolean), h=a.find(x=>x.homeAway==='home'), w=a.find(x=>x.homeAway==='away'); if(h&&w) return [h,w];
+    const me=a.find(x=>x.team&&String(x.team.id)===TEAM_ID), op=a.find(x=>x!==me); return f.home?[me,op]:[op,me]};
   const out={stats:[],lineups:null};
   const bt=(j.boxscore&&j.boxscore.teams)||[];
   if(bt.length>=2){
-    const [l,r]=pick(bt), m=t=>{const o={};((t&&t.statistics)||[]).forEach(x=>{o[x.name]=x.displayValue!=null?x.displayValue:x.value});return o};
-    const ls=m(l), rs=m(r);
-    STAT_ORDER.forEach(([k,label,unit])=>{
-      if(ls[k]==null&&rs[k]==null) return;
-      const lv=parseFloat(ls[k])||0, rv=parseFloat(rs[k])||0, tot=lv+rv;
-      out.stats.push({label,l:(ls[k]==null?'—':ls[k])+(unit&&ls[k]!=null?unit:''),r:(rs[k]==null?'—':rs[k])+(unit&&rs[k]!=null?unit:''),pct:tot>0?lv/tot*100:50});
-    });
+    const [l,r]=pick(bt), m=t=>{const v={},lab={};((t&&t.statistics)||[]).forEach(x=>{v[x.name]=x.displayValue!=null?x.displayValue:x.value;lab[x.name]=x.label||x.displayName||x.name});return [v,lab]};
+    const [ls,ll]=m(l), [rs,rl]=m(r), push=(label,a,b,unit)=>{const lv=parseFloat(a)||0, rv=parseFloat(b)||0, tot=lv+rv;
+      out.stats.push({label,l:(a==null?'—':a)+(unit&&a!=null?unit:''),r:(b==null?'—':b)+(unit&&b!=null?unit:''),pct:tot>0?lv/tot*100:50})};
+    STAT_ORDER.forEach(([k,label,unit])=>{ if(ls[k]!=null||rs[k]!=null) push(label,ls[k],rs[k],unit) });
+    if(!out.stats.length) Object.keys(ls).concat(Object.keys(rs).filter(k=>!(k in ls))).slice(0,14).forEach(k=>push(ll[k]||rl[k]||k,ls[k],rs[k]));
   }
   const ro=j.rosters||[];
   if(ro.length>=2){
     const mk=t=>{ if(!t||!t.roster||!t.roster.length) return null;
       const pl=t.roster.map(p=>({n:p.jersey||'',name:(p.athlete&&(p.athlete.displayName||p.athlete.fullName))||'—',
         pos:(p.position&&(p.position.abbreviation||p.position.name))||'',starter:!!p.starter}));
+      const hasStarters=pl.some(p=>p.starter);
       return {name:t.team&&ru(t.team.displayName||t.team.name), formation:typeof t.formation==='object'&&t.formation?t.formation.name:(t.formation||''),
-        starters:pl.filter(p=>p.starter), subs:pl.filter(p=>!p.starter)} };
+        starters:hasStarters?pl.filter(p=>p.starter):pl.slice(0,11), subs:hasStarters?pl.filter(p=>!p.starter):pl.slice(11)} };
     const [l,r]=pick(ro); out.lineups=[mk(l),mk(r)];
   }
   return out;
 }
+const diag=raw=>raw?`<br><small>Поля ответа ESPN: ${esc(Object.keys(raw).slice(0,10).join(', '))}</small>`:'';
 function lineupHTML(t,side,f){
   if(!t) return '';
   const nm=side===(f.home?0:1)?TEAM.name:f.opp, lg=side===0?logos(f)[0]:logos(f)[1];
@@ -570,11 +604,13 @@ function renderDetail(){
   const body=$('#dBody'), raw=DET.data[DET.id], err=DET.err[DET.id];
   if(DET.tab==='events'){
     // события берём из табло, а если их там нет — из подробного ответа матча (summary)
-    let ev=f.events||[]; if(!ev.length&&raw) ev=parseEvents(raw);
+    let ev=raw?parseEvents(raw):[]; if(!ev.length) ev=f.events||[];
     if(!ev.length){
-      body.innerHTML=`<div class="note">${f.state==='pre'?'Матч ещё не начался':(!raw&&!err?'Загрузка…':'Нет данных о событиях'+(err&&!raw?' ('+esc(err)+')':''))}</div>`;return}
+      body.innerHTML=`<div class="note">${f.state==='pre'?'Матч ещё не начался':(!raw&&!err?'Загрузка…':'Нет данных о событиях'+(err&&!raw?' ('+esc(err)+')':'')+diag(raw))}</div>`;return}
     const [L,R]=names(f), [lg,rg]=logos(f), meLeft=f.home;
-    const cell=(e,left)=>`${left?'':(e.goal?'⚽️':e.red?'🟥':'🟨')+' '}<b>${esc(e.player||'—')}</b>${e.goal?(e.og?' (автогол)':e.pen?' (пен.)':''):''}${left?' '+(e.goal?'⚽️':e.red?'🟥':'🟨'):''}`;
+    const ico=e=>e.sub?'🔄':e.goal?'⚽️':e.red?'🟥':'🟨';
+    const cell=(e,left)=>{const body=e.sub?`<b>${esc(e.pin||'—')}</b> <span style="color:#34c759">▲</span><br><span style="color:var(--muted);font-size:13px">${esc(e.pout||'—')} ▼</span>`
+      :`<b>${esc(e.player||'—')}</b>${e.goal?(e.og?' (автогол)':e.pen?' (пен.)':''):''}`; return left?`${body} ${ico(e)}`:`${ico(e)} ${body}`};
     body.innerHTML=`<div class="list"><div class="evh"><div>${esc(L)} ${miniCrest(L,lg)}</div><div></div><div>${miniCrest(R,rg)} ${esc(R)}</div></div>`+
       (f.state==='in'?[...ev].reverse():ev).map(e=>{const left=(e.mine===meLeft);
         return `<div class="ev2"><div class="l">${left?cell(e,true):''}</div><div class="m">${esc(e.min)}</div><div>${left?'':cell(e,false)}</div></div>`}).join('')+'</div>';
@@ -583,13 +619,13 @@ function renderDetail(){
   if(!raw){ body.innerHTML=`<div class="note">${err?'Подробные данные недоступны ('+esc(err)+').':'Загрузка…'}</div>`; return }
   const d=parseSummary(raw,f);
   if(DET.tab==='stats'){
-    if(!d.stats.length){body.innerHTML=`<div class="note">${f.state==='pre'?'Статистика появится после начала матча':'Статистика недоступна'}</div>`;return}
+    if(!d.stats.length){body.innerHTML=`<div class="note">${f.state==='pre'?'Статистика появится после начала матча':'Статистика недоступна'+diag(raw)}</div>`;return}
     const [L,R]=names(f), meLeft=f.home;
     body.innerHTML='<div class="list">'+d.stats.map(s=>`<div class="st"><div class="h"><span>${esc(s.l)}</span><span>${esc(s.label)}</span><span>${esc(s.r)}</span></div>
       <div class="bar"><i class="${meLeft?'me':''}" style="flex:${s.pct}"></i><i class="${meLeft?'':'me'}" style="flex:${100-s.pct}"></i></div></div>`).join('')+'</div>';
   } else {
     const lu=d.lineups;
-    body.innerHTML=lu&&(lu[0]||lu[1])?lineupHTML(lu[0],0,f)+lineupHTML(lu[1],1,f):`<div class="note">${f.state==='pre'?'Составы пока не объявлены':'Составы недоступны'}</div>`;
+    body.innerHTML=lu&&(lu[0]||lu[1])?lineupHTML(lu[0],0,f)+lineupHTML(lu[1],1,f):`<div class="note">${f.state==='pre'?'Составы пока не объявлены':'Составы недоступны'+diag(raw)}</div>`;
   }
 }
 document.addEventListener('click',e=>{
@@ -622,6 +658,7 @@ async function loadStandings(lg=CUR_LG){
     rows.sort((a,b)=>b.pts-a.pts||b.gd-a.gd||b.gf-a.gf);
     if(rows.every(r=>r.rank)) rows.sort((a,b)=>a.rank-b.rank); else rows.forEach((r,i)=>r.rank=i+1);
     S.rows=rows; S.at=Date.now(); S.err=''; store.set('st_'+lg,JSON.stringify(rows));
+    prefetchLogos(rows.filter(r=>!CREST_DATA[r.name]).map(r=>r.logo));
   }catch(e){S.err=(e&&e.message)||'ошибка'}
   if(lg===CUR_LG) renderStandings();
 }
@@ -659,6 +696,8 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>switchTab(t.dataset.t
 
 renderAll();   // сразу показываем сохранённые данные
 renderStandings(); loadStandings();
+setTimeout(()=>{ if(CUR_LG!=='uefa.champions') loadStandings('uefa.champions') },1500);   // заранее подгружаем таблицу и логотипы Лиги чемпионов
+Object.values(STANDS).forEach(S=>S.rows&&prefetchLogos(S.rows.filter(r=>!CREST_DATA[r.name]).map(r=>r.logo)));
 refresh();     // затем подтягиваем свежие
 
 /* ---------- Подсказка установки (iOS Safari) ---------- */
