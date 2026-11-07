@@ -229,7 +229,8 @@ p.foot{color:var(--muted);font-size:12.5px;margin:12px 16px 0}
 
   <section class="screen" id="pstats">
     <h1>Статистика</h1>
-    <div class="seg" id="psSeg"><button data-ps="goals">Голы</button><button data-ps="assists">Голевые передачи</button><button data-ps="value">Трансферная стоимость</button></div>
+    <div class="chips" id="psComp"></div>
+    <div class="chips" id="psSeg"></div>
     <div class="list" id="psBody"></div>
     <p class="foot" id="psFoot"></p>
   </section>
@@ -438,6 +439,7 @@ async function refresh(){
   firstLoad=false;
   prefetchLogos(FIXTURES.filter(f=>!CREST_DATA[f.opp]).map(f=>f.oppLogo));
   renderAll();
+  loadPlayerStats();
   if(DET.open){renderDetail();loadDetail()}
 }
 function nearMatch(){const n=Date.now();return FIXTURES.some(f=>f.state==='in'||(f.state==='pre'&&n>f.date-15*60000&&n<f.date.getTime()+130*60000))}
@@ -749,8 +751,9 @@ document.querySelectorAll('#lgMenu button').forEach(b=>b.onclick=e=>{e.stopPropa
 document.addEventListener('click',()=>{$('#lgMenu').classList.remove('show');$('#lgBtn').classList.remove('open')});
 
 
-/* ---------- Статистика игроков (встроена вручную) ---------- */
-// Голы/передачи — Премьер лига 2026/27, 9 матчей (VAVEL, ESPN, 5 ноября 2026).
+/* ---------- Статистика игроков ---------- */
+// Премьер лига: если ESPN недоступен — данные, внесённые вручную (VAVEL/ESPN на 5 ноября 2026).
+// Лига чемпионов и Премьер лига при наличии связи считаются автоматически по составам сыгранных матчей ESPN.
 // Стоимость — оценка FootballTransfers (ETV) на ноябрь 2026, млн €; null — значение неизвестно.
 const PSTATS_AS_OF='5 ноября 2026';
 const PLAYERS=[
@@ -764,28 +767,122 @@ const PLAYERS=[
   {n:'Жереми Фримпонг',pos:'Защитник',m:5,g:0,a:0,v:null},{n:'Льюис Кумас',pos:'Нападающий',m:7,g:0,a:0,v:null},
   {n:'Рио Нгумоха',pos:'Нападающий',m:7,g:0,a:0,v:null}
 ];
-let PS_TAB=store.get('pstab')||'goals'; if(!['goals','assists','value'].includes(PS_TAB)) PS_TAB='goals';
+const PKEYS={'Александер Исак':'isak','Виктор Муньос':'munoz','Коди Гакпо':'gakpo','Доминик Собослаи':'szoboszlai','Брэдли Баркола':'barcola','Флориан Вирц':'wirtz',
+  'Райан Гравенберх':'gravenberch','Жереми Жаке':'jacquet','Милош Керкез':'kerkez','Алексис Мак Аллистер':'mac allister','Рональд Араухо':'araujo','Вирджил ван Дейк':'van dijk',
+  'Алиссон':'alisson','Трей Нёни':'nyoni','Жереми Фримпонг':'frimpong','Льюис Кумас':'koumas','Рио Нгумоха':'ngumoha'};
+PLAYERS.forEach(p=>p.k=PKEYS[p.n]);
+const norm=t=>String(t||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+const POS_RU=a=>{a=String(a||'').toUpperCase(); return /^G/.test(a)?'Вратарь':/D|B$/.test(a)&&!/^DM/.test(a)?'Защитник':/^(F|ST|CF|LW|RW|SS|W)/.test(a)?'Нападающий':a?'Полузащитник':''};
+const ruPl=n=>{n=Math.abs(n)%100;const d=n%10;return n>10&&n<20?'матчей':d===1?'матч':d>=2&&d<=4?'матча':'матчей'};
+const PS_COMPS={'eng.1':'Премьер лига','uefa.champions':'Лига чемпионов'};
+let PS_COMP=store.get('pscomp'); if(!PS_COMPS[PS_COMP]&&PS_COMP!=='value') PS_COMP='eng.1';
+let PS_TAB=store.get('pstab')||'goals'; if(!['goals','assists','cs','yellow','red','rating'].includes(PS_TAB)) PS_TAB='goals';
+
+/* автоматический сбор: составы сыгранных матчей ESPN → голы, передачи, матчи */
+let PSC={}; try{PSC=JSON.parse(store.get('psc')||'{}')}catch(e){}   // id матча -> строки игроков (для завершённых матчей)
+const PSLIVE={};                                                      // id -> {at, rows} для идущих матчей
+let psBusy=false, psAt=0;
+async function fetchSummary(id,lg){
+  for(const l of [lg,...Object.keys(LEAGUES)].filter((v,i,a)=>v&&a.indexOf(v)===i)){
+    try{const r=await fetch(`${ESPN}${l}/summary?event=${encodeURIComponent(id)}`,{cache:'no-store'});
+      if(r.ok){const j=await r.json(); if(j&&(j.rosters||j.boxscore)) return j}}catch(e){}
+  } return null;
+}
+function rosterRows(j){
+  const t=(j.rosters||[]).find(x=>x.team&&String(x.team.id)===TEAM_ID); if(!t||!t.roster) return null;
+  let has=false; const out=[];
+  t.roster.forEach(p=>{
+    const stats=p.stats||[], st={}; stats.forEach(s=>{st[s.name]=+(s.value!=null?s.value:s.displayValue)||0});
+    if(stats.some(s=>/goal/i.test(s.name))) has=true;
+    const name=p.athlete&&(p.athlete.displayName||p.athlete.fullName); if(!name) return;
+    const played=!!(p.starter||p.subbedIn||st.appearances>0||st.subIns>0);
+    const rk=stats.find(x=>/rating/i.test(x.name)), rt=rk&&+(rk.value!=null?rk.value:rk.displayValue)>0?+(rk.value!=null?rk.value:rk.displayValue):null;
+    out.push({name,pos:(p.position&&(p.position.abbreviation||p.position.name))||'',g:st.totalGoals||st.goals||0,a:st.goalAssists||st.assists||0,
+      y:st.yellowCards||0,r:st.redCards||0,rt,m:played?1:0});
+  });
+  return has?out:null;
+}
+const psPlayed=comp=>FIXTURES.filter(f=>f.comp===comp&&(f.state==='post'||f.state==='in'));
+async function loadPlayerStats(){
+  if(psBusy) return; psBusy=true;
+  try{
+    const todo=[];
+    FIXTURES.forEach(f=>{
+      if(!/^\d+$/.test(f.id)||!Object.values(PS_COMPS).includes(f.comp)) return;
+      if(f.state==='post'&&(!PSC[f.id]||Array.isArray(PSC[f.id]))) todo.push(f);
+      else if(f.state==='in'&&(!PSLIVE[f.id]||Date.now()-PSLIVE[f.id].at>45000)) todo.push(f);
+    });
+    for(let i=0;i<todo.length;i+=3){
+      await Promise.all(todo.slice(i,i+3).map(async f=>{
+        const j=await fetchSummary(f.id,f.lg); const rows=j&&rosterRows(j); if(!rows) return;
+        if(f.state==='post'){PSC[f.id]={v:2,rows}} else PSLIVE[f.id]={at:Date.now(),rows};
+      }));
+    }
+    if(todo.length){ // убираем из кэша чужие/устаревшие записи и сохраняем
+      const ids=new Set(FIXTURES.map(f=>f.id)); Object.keys(PSC).forEach(k=>{if(!ids.has(k)) delete PSC[k]});
+      store.set('psc',JSON.stringify(PSC)); psAt=Date.now();
+    }
+  }catch(e){}
+  psBusy=false; renderPStats();
+}
+function aggRows(comp){
+  const fx=psPlayed(comp), map=new Map(); let loaded=0;
+  fx.forEach(f=>{
+    const e0=f.state==='post'?PSC[f.id]:PSLIVE[f.id], rows=e0&&(Array.isArray(e0)?(f.state==='in'?e0:null):(e0.rows||null)); if(!rows) return; loaded++;
+    const ga=f.home?f.as:f.hs;                                   // сколько пропустил Ливерпуль в матче
+    rows.forEach(r=>{const nk=norm(r.name), st=PLAYERS.find(p=>p.k&&nk.includes(p.k)); const key=st?st.k:nk;
+      const e=map.get(key)||{n:st?st.n:r.name,pos:st?st.pos:POS_RU(r.pos),m:0,g:0,a:0,y:0,r:0,cs:0,rs:0,rn:0,v:st?st.v:null};
+      e.m+=r.m;e.g+=r.g;e.a+=r.a;e.y+=r.y||0;e.r+=r.r||0;
+      if(ga===0&&r.m&&/Вратарь|Защитник/.test(e.pos)) e.cs++;     // сухой матч — для вратарей и защитников
+      if(r.rt!=null){e.rs+=r.rt;e.rn++}
+      map.set(key,e)})});
+  const rows=[...map.values()].filter(p=>p.m>0||p.g>0||p.a>0).map(p=>({...p,rt:p.rn?p.rs/p.rn:null}));
+  return {rows,loaded,total:fx.length};
+}
+const PS_TABS=[['goals','Голы','g'],['assists','Голевые передачи','a'],['cs','Сухие матчи','cs'],['yellow','Жёлтые карточки','y'],['red','Красные карточки','r'],['rating','Средняя оценка','rt']];
 function renderPStats(){
-  document.querySelectorAll('#psSeg button').forEach(b=>b.classList.toggle('on',b.dataset.ps===PS_TAB));
-  const key=PS_TAB==='goals'?'g':PS_TAB==='assists'?'a':'v';
-  const list=[...PLAYERS].sort((x,y)=>{
+  if(!$('#psBody')) return;
+  const top=$('#psComp'), sub=$('#psSeg');
+  if(top.children.length!==3) top.innerHTML=[['eng.1','Премьер лига'],['uefa.champions','Лига чемпионов'],['value','Трансферная стоимость']].map(([k,t])=>`<button class="chip" data-pc="${k}">${t}</button>`).join('');
+  if(sub.children.length!==PS_TABS.length) sub.innerHTML=PS_TABS.map(([k,t])=>`<button class="chip" data-ps="${k}">${t}</button>`).join('');
+  top.querySelectorAll('.chip').forEach(b=>b.classList.toggle('on',b.dataset.pc===PS_COMP));
+  sub.querySelectorAll('.chip').forEach(b=>b.classList.toggle('on',b.dataset.ps===PS_TAB));
+  sub.style.display=PS_COMP==='value'?'none':'';
+  const body=$('#psBody'), foot=$('#psFoot'); let list,key,note;
+  if(PS_COMP==='value'){ key='v'; list=PLAYERS; note='Оценка FootballTransfers (ETV) на ноябрь 2026, внесена вручную и не обновляется сама. Для игроков без данных стоит «н/д», они в конце списка.'; }
+  else{
+    const tab=PS_TABS.find(t=>t[0]===PS_TAB)||PS_TABS[0]; key=tab[2];
+    const compName=PS_COMPS[PS_COMP], agg=aggRows(compName), complete=agg.total&&agg.loaded===agg.total&&agg.rows.length;
+    const staticOK=PS_COMP==='eng.1'&&(key==='g'||key==='a');
+    const cov=`учтено матчей ${agg.loaded} из ${agg.total}${psAt?', обновлено '+fmtTime(new Date(psAt)):''}`;
+    if(complete||(agg.rows.length&&!staticOK)){ list=agg.rows; note=`${compName}: ${cov}. Считается автоматически по составам матчей ESPN, идущий матч — в реальном времени.`+(complete?'':' Остальные матчи подгружаются.'); }
+    else if(staticOK){ list=PLAYERS; note=`Премьер лига 2026/27, данные внесены вручную на ${PSTATS_AS_OF}. ${agg.total?`Автоматически загружено ${agg.loaded} из ${agg.total} матчей.`:'Нет связи с ESPN.'}`; }
+    else { body.innerHTML=`<div class="note">${agg.total?'Загружаем статистику матчей…':'Статистика появится после загрузки данных ESPN.'}</div>`; foot.textContent=''; return }
+    if(key==='rt'&&!list.some(p=>p.rt!=null)){
+      body.innerHTML='<div class="note">ESPN не отдаёт оценки игроков за матчи, поэтому средняя оценка пока недоступна. Пункт заполнится сам, если в данных матчей появятся оценки.</div>'; foot.textContent=note; return }
+    if(key==='y'||key==='r') note+=' Чем больше карточек, тем выше в списке.';
+    if(key==='cs') note+=' Сухой матч засчитывается вратарям и защитникам, сыгравшим в матче, в котором Ливерпуль не пропустил.';
+  }
+  list=[...list].sort((x,y)=>{
     const xv=x[key]==null?-1:x[key], yv=y[key]==null?-1:y[key];
     if(yv!==xv) return yv-xv;
-    if(key!=='v'){const o=key==='g'?'a':'g'; if(y[o]!==x[o]) return y[o]-x[o]}   // при равенстве — по второму показателю
+    if(key==='g'||key==='a'){const o=key==='g'?'a':'g'; if((y[o]||0)!==(x[o]||0)) return (y[o]||0)-(x[o]||0)}
+    if(key==='rt') return y.m-x.m||x.n.localeCompare(y.n,'ru');
     return x.m-y.m||x.n.localeCompare(y.n,'ru');
   });
-  const max=Math.max(1,...list.map(p=>p[key]||0));
-  let rank=0, prev=null;
-  $('#psBody').innerHTML=list.map((p,i)=>{
+  const max=Math.max(1,...list.map(p=>p[key]||0)); let rank=0, prev=null;
+  const fmt=v=>key==='v'?'€'+v.toString().replace('.',',')+' млн':key==='rt'?v.toFixed(2).replace('.',','):String(v);
+  body.innerHTML=list.map((p,i)=>{
     const v=p[key]; if(v!==prev){rank=i+1;prev=v}
-    const val=v==null?'<div class="val na">н/д</div>':`<div class="val">${key==='v'?'€'+v.toString().replace('.',',')+' млн':v}</div>`;
+    const val=v==null?'<div class="val na">н/д</div>':`<div class="val">${fmt(v)}</div>`;
     const bar=v?`<div class="psbar"><i style="width:${Math.max(3,v/max*100)}%"></i></div>`:'';
-    return `<div class="ps ${rank<=3&&v?'top':''}"><div class="rk">${v==null?'–':rank}</div><div class="nm"><b>${esc(p.n)}</b><small>${p.pos} · ${p.m} матчей</small></div>${val}${bar}</div>`}).join('');
-  $('#psFoot').textContent=key==='v'
-    ?`Оценка FootballTransfers (ETV) на ноябрь 2026. Для игроков без данных стоит «н/д», они в конце списка.`
-    :`Премьер лига 2026/27, данные на ${PSTATS_AS_OF}. Показатели внесены вручную и не обновляются сами.`;
+    return `<div class="ps ${rank<=3&&v?'top':''}"><div class="rk">${v==null?'–':rank}</div><div class="nm"><b>${esc(p.n)}</b><small>${esc(p.pos)}${key==='v'?'':' · '+p.m+' '+ruPl(p.m)}</small></div>${val}${bar}</div>`}).join('');
+  foot.textContent=note;
 }
-document.querySelectorAll('#psSeg button').forEach(b=>b.onclick=()=>{PS_TAB=b.dataset.ps;store.set('pstab',PS_TAB);renderPStats()});
+document.addEventListener('click',e=>{
+  const pc=e.target.closest('[data-pc]'); if(pc){PS_COMP=pc.dataset.pc;store.set('pscomp',PS_COMP);renderPStats();return}
+  const ps=e.target.closest('[data-ps]'); if(ps){PS_TAB=ps.dataset.ps;store.set('pstab',PS_TAB);renderPStats()}
+});
 
 /* ---------- Навигация ---------- */
 function switchTab(id){
