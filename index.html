@@ -512,6 +512,23 @@ async function loadDetail(){
   }catch(e){ DET.err[id]=(e&&e.message)||'сеть/CORS' }
   if(DET.open&&DET.id===id) renderDetail();
 }
+function parseEvents(j){
+  const hd=j.header&&j.header.competitions&&j.header.competitions[0];
+  const det=(hd&&hd.details)||j.details||[], out=[];
+  const who=d=>{const a=(d.athletesInvolved&&d.athletesInvolved[0])||(d.participants&&d.participants[0]&&d.participants[0].athlete);
+    return (a&&(a.displayName||a.fullName||(a.athlete&&a.athlete.displayName)))||''};
+  det.forEach(d=>{ if(d.scoringPlay||d.yellowCard||d.redCard) out.push({min:(d.clock&&d.clock.displayValue)||'',goal:!!d.scoringPlay,yellow:!!d.yellowCard,
+    red:!!d.redCard,og:!!d.ownGoal,pen:!!d.penaltyKick,mine:!!(d.team&&String(d.team.id)===TEAM_ID),player:who(d)}) });
+  if(!out.length) (j.keyEvents||[]).forEach(k=>{
+    const tt=(k.type&&(k.type.text||k.type.type))||'';
+    if(/shootout/i.test(tt)||k.shootout) return;
+    const goal=!!k.scoringPlay||(/goal/i.test(tt)&&!/disallow|no goal/i.test(tt)), yellow=/yellow/i.test(tt), red=/red/i.test(tt);
+    if(!goal&&!yellow&&!red) return;
+    out.push({min:(k.clock&&k.clock.displayValue)||'',goal,yellow:yellow&&!red,red,og:/own/i.test(tt),pen:/penalty/i.test(tt),
+      mine:!!(k.team&&String(k.team.id)===TEAM_ID),player:who(k)});
+  });
+  return out;
+}
 function parseSummary(j,f){
   const pick=arr=>{const me=arr.find(x=>x&&x.team&&String(x.team.id)===TEAM_ID), op=arr.find(x=>x&&x!==me);
     return f.home?[me,op]:[op,me]};
@@ -552,8 +569,10 @@ function renderDetail(){
   document.querySelectorAll('#seg button').forEach(b=>b.classList.toggle('on',b.dataset.tab===DET.tab));
   const body=$('#dBody'), raw=DET.data[DET.id], err=DET.err[DET.id];
   if(DET.tab==='events'){
-    const ev=f.events||[];
-    if(!ev.length){body.innerHTML=`<div class="note">${f.state==='pre'?'Матч ещё не начался':'Нет данных о событиях'}</div>`;return}
+    // события берём из табло, а если их там нет — из подробного ответа матча (summary)
+    let ev=f.events||[]; if(!ev.length&&raw) ev=parseEvents(raw);
+    if(!ev.length){
+      body.innerHTML=`<div class="note">${f.state==='pre'?'Матч ещё не начался':(!raw&&!err?'Загрузка…':'Нет данных о событиях'+(err&&!raw?' ('+esc(err)+')':''))}</div>`;return}
     const [L,R]=names(f), [lg,rg]=logos(f), meLeft=f.home;
     const cell=(e,left)=>`${left?'':(e.goal?'⚽️':e.red?'🟥':'🟨')+' '}<b>${esc(e.player||'—')}</b>${e.goal?(e.og?' (автогол)':e.pen?' (пен.)':''):''}${left?' '+(e.goal?'⚽️':e.red?'🟥':'🟨'):''}`;
     body.innerHTML=`<div class="list"><div class="evh"><div>${esc(L)} ${miniCrest(L,lg)}</div><div></div><div>${miniCrest(R,rg)} ${esc(R)}</div></div>`+
