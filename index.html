@@ -265,10 +265,12 @@ p.foot{color:var(--muted);font-size:12.5px;margin:12px 16px 0}
     <h1>Трансляция</h1>
     <div class="player"><video id="wVideo" controls playsinline webkit-playsinline preload="none"></video><div class="ph" id="wPh">Вставьте ссылку Ace Stream<br>или прямую ссылку .m3u8 / .mp4</div></div>
     <div class="wst" id="wStatus"></div>
+    <div class="wst" id="wDiag" style="word-break:break-all"></div>
     <input class="field" id="wLink" type="text" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="acestream://… или ID (40 символов), или https://….m3u8">
     <input class="field" id="wName" type="text" placeholder="Название (необязательно — для списка)">
     <div class="btns"><button class="btn2" id="wPlay">Смотреть</button><button class="btn2 ghost" id="wSave">В список</button></div>
     <div class="btns"><button class="btn2 ghost" id="wApp" style="display:none">Открыть в приложении Ace Stream</button></div>
+    <div class="btns"><button class="btn2 ghost" id="wCheck">Проверить сервер Engine</button></div>
     <h2>Мои трансляции</h2>
     <div class="list" id="wList"></div>
     <h2>Сервер Ace Stream (Engine)</h2>
@@ -1037,6 +1039,13 @@ function aceParse(input){
 }
 function aceBase(){let e=(ACE.engine||'').trim(); if(!e) return ''; if(!/^https?:\/\//i.test(e)) e='https://'+e; return e.replace(/\/+$/,'')}
 function wStatus(msg,err){const el=$('#wStatus'); el.textContent=msg||''; el.classList.toggle('err',!!err)}
+function mediaMsg(code){
+  return code===2?'Нет связи с потоком (код 2): сервер не ответил или вернул ошибку. Проверьте, что Engine запущен, туннель включён и трансляция с этим ID жива.'
+    :code===3?'Видео не удалось декодировать (код 3): iPhone не поддерживает кодек этого потока.'
+    :code===4?'Safari не принял ответ как видео (код 4): адрес Engine или ID неверны, манифест пуст либо в нём адреса вида http://127.0.0.1…, которые недоступны с iPhone.'
+    :'Не удалось воспроизвести (код '+(code||'?')+'): проверьте Engine, HTTPS-адрес и ссылку.';
+}
+function wDiag(src){const el=$('#wDiag'); el.innerHTML=src?`Запрашиваем: <a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`:''}
 function loadHls(){return new Promise((res,rej)=>{ if(window.Hls) return res(); const sc=document.createElement('script');
   sc.src='https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js'; sc.onload=res; sc.onerror=()=>rej(new Error('hls.js не загрузился (нет интернета?)')); document.head.appendChild(sc)})}
 async function playStream(raw){
@@ -1049,7 +1058,7 @@ async function playStream(raw){
   } else src=p.url;
   if(location.protocol==='https:'&&/^http:\/\//i.test(src)){wStatus('Страница открыта по HTTPS, а поток по HTTP — Safari его заблокирует. Нужен HTTPS-адрес.',true)}
   else wStatus('Подключаемся…');
-  $('#wPh').style.display='none';
+  $('#wPh').style.display='none'; wDiag(src);
   const app=$('#wApp'); if(p.kind==='ace'){app.style.display='';app.dataset.href='acestream://'+p.id} else app.style.display='none';
   if(hlsInst){hlsInst.destroy();hlsInst=null}
   const isHls=/\.m3u8(\?|$)/i.test(src);
@@ -1061,7 +1070,7 @@ async function playStream(raw){
       hlsInst.on(Hls.Events.ERROR,(e,d)=>{ if(d.fatal) wStatus('Не удалось получить поток: проверьте, что Engine запущен, доступен по HTTPS и ID верный.',true)});
     } else { v.src=src; }
     v.onplaying=()=>wStatus('Воспроизведение');
-    v.onerror=()=>wStatus('Не удалось воспроизвести: проверьте, что Engine запущен, доступен по HTTPS и ссылка верна.',true);
+    v.onerror=()=>wStatus(mediaMsg(v.error&&v.error.code),true);
     v.play().catch(()=>{});
   }catch(e){wStatus(e.message||'Ошибка воспроизведения',true)}
 }
@@ -1077,6 +1086,13 @@ $('#wPlay').onclick=()=>playStream($('#wLink').value);
 $('#wSave').onclick=()=>{
   const link=$('#wLink').value.trim(); if(!aceParse(link)){wStatus('Сначала вставьте корректную ссылку.',true);return}
   if(!ACE.list.some(c=>c.link===link)) ACE.list.push({name:$('#wName').value.trim(),link}); saveAce(); renderWList(); $('#wName').value=''; wStatus('Добавлено в список');
+};
+$('#wCheck').onclick=async()=>{
+  const base=aceBase(); if(!base){wStatus('Сначала укажите адрес Engine внизу страницы.',true);return}
+  wStatus('Проверяем '+base+' …'); const ac=new AbortController(), tm=setTimeout(()=>ac.abort(),8000);
+  try{ await fetch(base+'/',{mode:'no-cors',cache:'no-store',signal:ac.signal}); clearTimeout(tm);
+    wStatus('Сервер отвечает ('+base+'). Если видео всё равно не идёт — проблема в самой трансляции, формате потока или адресах в манифесте.'); }
+  catch(e){ clearTimeout(tm); wStatus('Сервер не отвечает ('+base+'): проверьте адрес, что Engine запущен и туннель (Funnel) включён. Адрес должен начинаться с https://.',true) }
 };
 $('#wApp').onclick=e=>{const h=e.currentTarget.dataset.href; if(h) location.href=h};
 $('#wList').addEventListener('click',e=>{
